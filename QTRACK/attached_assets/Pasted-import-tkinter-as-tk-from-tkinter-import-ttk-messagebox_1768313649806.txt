@@ -1,0 +1,2900 @@
+import tkinter as tk
+from tkinter import ttk, messagebox, scrolledtext, simpledialog, filedialog
+import sqlite3
+from datetime import datetime, timedelta
+import os
+import pandas as pd
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+import hashlib
+import csv
+from PIL import Image, ImageTk
+import webbrowser
+import logging
+import logging.handlers
+from functools import partial, lru_cache
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+import numpy as np
+from collections import defaultdict
+import json
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import threading
+import time
+from typing import Dict, List, Tuple, Optional, Any
+import sys
+import bcrypt
+
+# Configuration du logging amélioré
+def setup_logging():
+    """Configure le système de logging avec rotation des fichiers"""
+    handler = logging.handlers.RotatingFileHandler(
+        'qtrack.log', 
+        maxBytes=10*1024*1024,  # 10MB
+        backupCount=5
+    )
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    handler.setFormatter(formatter)
+    
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+    
+    # Logger pour les erreurs spécifiques
+    error_logger = logging.getLogger('error')
+    error_logger.setLevel(logging.ERROR)
+    error_logger.addHandler(handler)
+
+setup_logging()
+
+class ConfigManager:
+    """Gestionnaire de configuration"""
+    def __init__(self):
+        self.config = self.load_config()
+    
+    def load_config(self):
+        """Charge la configuration depuis un fichier JSON"""
+        default_config = {
+            "database": {
+                "path": "qtrack.db",
+                "timeout": 5000
+            },
+            "ui": {
+                "theme": "clam",
+                "colors": {
+                    "primary": "#2C3E50",
+                    "secondary": "#3498DB",
+                    "accent": "#27AE60",
+                    "warning": "#E74C3C",
+                    "background": "#F8F9FA",
+                    "card": "#FFFFFF",
+                    "text": "#2C3E50",
+                    "text_light": "#7F8C8D",
+                    "border": "#E0E0E0",
+                    "success": "#27AE60",
+                    "danger": "#E74C3C",
+                    "info": "#3498DB",
+                    "section_blue": "#3498DB",
+                    "section_green": "#27AE60",
+                    "section_gray": "#95A5A6"
+                }
+            },
+            "notifications": {
+                "check_interval": 300,
+                "max_notifications": 50
+            },
+            "security": {
+                "password_policy": {
+                    "min_length": 8,
+                    "require_uppercase": True,
+                    "require_lowercase": True,
+                    "require_digit": True,
+                    "require_special": True
+                }
+            }
+        }
+        
+        try:
+            with open('config.json', 'r') as f:
+                user_config = json.load(f)
+                # Fusionner avec les valeurs par défaut
+                self.merge_dicts(default_config, user_config)
+        except (FileNotFoundError, json.JSONDecodeError):
+            # Sauvegarder la configuration par défaut
+            self.save_config(default_config)
+        
+        return default_config
+    
+    def merge_dicts(self, base, update):
+        """Fusionne deux dictionnaires récursivement"""
+        for key, value in update.items():
+            if key in base and isinstance(base[key], dict) and isinstance(value, dict):
+                self.merge_dicts(base[key], value)
+            else:
+                base[key] = value
+    
+    def save_config(self, config):
+        """Sauvegarde la configuration"""
+        with open('config.json', 'w') as f:
+            json.dump(config, f, indent=4)
+
+class KpiCache:
+    """Gestionnaire de cache pour les KPI"""
+    def __init__(self, max_size=100):
+        self.cache = {}
+        self.max_size = max_size
+        self.access_order = []
+    
+    def get(self, key):
+        if key in self.cache:
+            # Mettre à jour l'ordre d'accès (LRU)
+            self.access_order.remove(key)
+            self.access_order.append(key)
+            return self.cache[key]
+        return None
+    
+    def set(self, key, value):
+        if len(self.cache) >= self.max_size:
+            # Supprimer le plus ancien
+            oldest = self.access_order.pop(0)
+            del self.cache[oldest]
+        self.cache[key] = value
+        self.access_order.append(key)
+    
+    def clear(self):
+        self.cache.clear()
+        self.access_order.clear()
+
+class TranslationManager:
+    def __init__(self):
+        self.current_language = "fr"
+        self.translations = {
+            "fr": {
+                "login_title": "Connexion au système de management de la qualité",
+                "username": "Utilisateur:",
+                "password": "Mot de passe:",
+                "login": "Connexion",
+                "register": "Créer un compte",
+                "success": "Succès",
+                "error": "Erreur",
+                "warning": "Avertissement",
+                "info": "Information",
+                "dashboard": "Tableau de Bord",
+                "nc_operations": "Opérations Qualité",
+                "analysis_pilotage": "Analyse & Pilotage",
+                "system_audit": "Système & Audit",
+                "reports": "Rapports",
+                "settings": "Paramètres",
+                "notifications": "Notifications",
+                "graphs": "Graphiques",
+                "export": "Export",
+                "user_management": "Gestion Utilisateurs",
+                "advanced_features": "Fonctionnalités Avancées",
+                "total_nc": "Total NC",
+                "nc_ouvertes": "NC Ouvertes",
+                "nc_critiques": "NC Critiques",
+                "nc_cloturees": "NC Clôturées",
+                "en_analyse": "En Analyse",
+                "action_lancee": "Action Lancée"
+            },
+            "en": {
+                "login_title": "Login to Quality Management System",
+                "username": "Username:",
+                "password": "Password:",
+                "login": "Login",
+                "register": "Create Account",
+                "success": "Success",
+                "error": "Error", 
+                "warning": "Warning",
+                "info": "Information",
+                "dashboard": "Dashboard",
+                "nc_operations": "Quality Operations",
+                "analysis_pilotage": "Analysis & Control",
+                "system_audit": "System & Audit",
+                "reports": "Reports",
+                "settings": "Settings",
+                "notifications": "Notifications",
+                "graphs": "Graphs",
+                "export": "Export",
+                "user_management": "User Management",
+                "advanced_features": "Advanced Features",
+                "total_nc": "Total NC",
+                "nc_ouvertes": "Open NC",
+                "nc_critiques": "Critical NC",
+                "nc_cloturees": "Closed NC",
+                "en_analyse": "In Analysis",
+                "action_lancee": "Action Started"
+            }
+        }
+    
+    def get_translation(self, key):
+        return self.translations[self.current_language].get(key, key)
+
+class NotificationSystem:
+    """Système de notifications avancé avec gestion des threads"""
+    def __init__(self, app):
+        self.app = app
+        self.notifications = []
+        self.notification_window = None
+        self.notification_count = 0
+        self.notification_thread = None
+        self.running = False
+        self.lock = threading.Lock()
+        
+    def start_notification_service(self):
+        """Démarre le service de notifications en arrière-plan"""
+        self.running = True
+        self.notification_thread = threading.Thread(target=self._notification_monitor)
+        self.notification_thread.daemon = True
+        self.notification_thread.start()
+        
+    def _notification_monitor(self):
+        """Surveille les événements et génère des notifications"""
+        while self.running:
+            try:
+                # Vérifier les NC non traitées
+                self.check_nc_notifications()
+                
+                # Vérifier les actions en retard
+                self.check_action_deadlines()
+                
+                time.sleep(300)  # Vérifier toutes les 5 minutes
+            except Exception as e:
+                logging.error(f"Erreur dans le service de notifications: {e}")
+                
+    def check_nc_notifications(self):
+        """Vérifie les nouvelles non-conformités"""
+        try:
+            self.app.cursor.execute("""
+                SELECT id_nc, type_defaut, gravite, date_nc 
+                FROM NonConformite 
+                WHERE statut = 'Ouvert' 
+                AND date_nc > datetime('now', '-1 day')
+            """)
+            new_nc = self.app.cursor.fetchall()
+            
+            for nc in new_nc:
+                self.add_notification(
+                    f"Nouvelle NC #{nc[0]}",
+                    f"Défaut: {nc[1]}, Gravité: {nc[2]}",
+                    "warning",
+                    f"nc_{nc[0]}"
+                )
+        except Exception as e:
+            logging.error(f"Erreur lors de la vérification des NC: {e}")
+            
+    def check_action_deadlines(self):
+        """Vérifie les actions correctives en retard"""
+        try:
+            self.app.cursor.execute("""
+                SELECT a.id_action, a.description, a.delai, a.statut, n.id_nc
+                FROM ActionCorrective a
+                JOIN NonConformite n ON a.id_nc = n.id_nc
+                WHERE a.statut != 'Clos'
+                AND datetime(a.delai, 'start of day') < date('now')
+            """)
+            overdue_actions = self.app.cursor.fetchall()
+            
+            for action in overdue_actions:
+                self.add_notification(
+                    f"Action en retard #{action[0]}",
+                    f"Action: {action[1][:50]}...",
+                    "error",
+                    f"action_{action[4]}"
+                )
+        except Exception as e:
+            logging.error(f"Erreur lors de la vérification des actions: {e}")
+            
+    def add_notification(self, title, message, level="info", tag=None):
+        """Ajoute une notification de manière thread-safe"""
+        with self.lock:
+            notification = {
+                'id': self.notification_count,
+                'title': title,
+                'message': message,
+                'level': level,
+                'timestamp': datetime.now(),
+                'tag': tag,
+                'read': False
+            }
+            self.notifications.append(notification)
+            self.notification_count += 1
+            self.show_notification(notification)
+            
+    def show_notification(self, notification):
+        """Affiche une notification avec vérification de la fenêtre"""
+        try:
+            if not self.notification_window or not self.notification_window.winfo_exists():
+                self.create_notification_window()
+                
+            # Vérifier si la fenêtre est encore valide
+            try:
+                self.notification_window.wm_state()
+            except tk.TclError:
+                self.create_notification_window()
+                return
+                
+            # Ajouter la notification à l'interface
+            frame = ttk.Frame(self.notification_window)
+            frame.pack(fill=tk.X, padx=10, pady=5)
+            
+            # Style basé sur le niveau
+            bg_color = {
+                'info': '#3498DB',
+                'warning': '#F39C12',
+                'error': '#E74C3C',
+                'success': '#27AE60'
+            }.get(notification['level'], '#3498DB')
+            
+            frame.configure(style=f'Notification.{notification["level"]}')
+            
+            # Contenu de la notification
+            ttk.Label(frame, text=notification['title'], font=('Segoe UI', 10, 'bold')).pack(anchor=tk.W)
+            ttk.Label(frame, text=notification['message'], font=('Segoe UI', 9)).pack(anchor=tk.W)
+            ttk.Label(frame, text=notification['timestamp'].strftime("%H:%M"), 
+                    font=('Segoe UI', 8), foreground='#7F8C8D').pack(anchor=tk.W)
+            
+            # Marquer comme lue au clic
+            frame.bind("<Button-1>", lambda e: self.mark_as_read(notification['id']))
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de l'affichage de la notification: {e}")
+            
+    def create_notification_window(self):
+        """Crée la fenêtre des notifications de manière sécurisée"""
+        try:
+            self.notification_window = tk.Toplevel(self.app.root)
+            self.notification_window.title("Notifications")
+            self.notification_window.geometry("400x300")
+            self.notification_window.transient(self.app.root)
+            
+            # Style personnalisé pour les notifications
+            style = ttk.Style()
+            style.configure('Notification.info', background='#3498DB')
+            style.configure('Notification.warning', background='#F39C12')
+            style.configure('Notification.error', background='#E74C3C')
+            style.configure('Notification.success', background='#27AE60')
+            
+            # Titre
+            ttk.Label(self.notification_window, text="Notifications", 
+                    font=('Segoe UI', 14, 'bold')).pack(pady=10)
+            
+            # Cadre des notifications
+            self.notifications_frame = ttk.Frame(self.notification_window)
+            self.notifications_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+            
+            # Bouton de vidage
+            ttk.Button(self.notification_window, text="Vider toutes", 
+                     command=self.clear_all_notifications).pack(pady=5)
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la création de la fenêtre de notifications: {e}")
+            
+    def mark_as_read(self, notification_id):
+        """Marque une notification comme lue de manière thread-safe"""
+        with self.lock:
+            for notification in self.notifications:
+                if notification['id'] == notification_id:
+                    notification['read'] = True
+                    break
+                    
+    def clear_all_notifications(self):
+        """Vide toutes les notifications"""
+        with self.lock:
+            self.notifications = []
+            for widget in self.notifications_frame.winfo_children():
+                widget.destroy()
+                
+    def stop(self):
+        """Arrête le service de notifications proprement"""
+        self.running = False
+        if self.notification_thread and self.notification_thread.is_alive():
+            self.notification_thread.join(timeout=2)  # Timeout pour éviter le blocage
+
+class GraphManager:
+    """Gestionnaire de graphiques avancés"""
+    def __init__(self, app):
+        self.app = app
+        self.figures = {}
+        
+    def create_nc_distribution_chart(self):
+        """Crée un graphique de distribution des NC par gravité"""
+        try:
+            # Récupérer les données
+            self.app.cursor.execute("""
+                SELECT gravite, COUNT(*) as count 
+                FROM NonConformite 
+                GROUP BY gravite
+            """)
+            data = self.app.cursor.fetchall()
+            
+            if not data:
+                return None
+                
+            gravities = [row[0] for row in data]
+            counts = [row[1] for row in data]
+            
+            # Créer le graphique
+            fig, ax = plt.subplots(figsize=(8, 6))
+            colors = {'Mineure': '#3498DB', 'Majeure': '#F39C12', 'Critique': '#E74C3C'}
+            bars = ax.bar(gravities, counts, color=[colors.get(g, '#95A5A6') for g in gravities])
+            
+            # Ajouter des étiquettes
+            ax.set_xlabel('Gravité')
+            ax.set_ylabel('Nombre de NC')
+            ax.set_title('Distribution des Non-Conformités par Gravité')
+            ax.grid(axis='y', linestyle='--', alpha=0.7)
+            
+            # Ajouter les valeurs sur les barres
+            for bar in bars:
+                height = bar.get_height()
+                ax.text(bar.get_x() + bar.get_width()/2., height,
+                       f'{height}', ha='center', va='bottom')
+                
+            return fig
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la création du graphique: {e}")
+            return None
+            
+    def create_status_evolution_chart(self):
+        """Crée un graphique d'évolution des statuts"""
+        try:
+            # Récupérer les données des 30 derniers jours
+            self.app.cursor.execute("""
+                SELECT date_nc, statut 
+                FROM NonConformite 
+                WHERE date_nc >= date('now', '-30 days')
+            """)
+            data = self.app.cursor.fetchall()
+            
+            if not data:
+                return None
+                
+            # Préparer les données
+            status_counts = defaultdict(lambda: defaultdict(int))
+            for date_str, status in data:
+                date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                date_key = date.date()
+                status_counts[date_key][status] += 1
+                
+            # Créer le graphique
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # Trier les dates
+            dates = sorted(status_counts.keys())
+            statuses = ['Ouvert', 'En analyse', 'Action lancée', 'Clos']
+            
+            # Créer les données pour le graphique
+            data_matrix = []
+            for status in statuses:
+                values = [status_counts[date].get(status, 0) for date in dates]
+                data_matrix.append(values)
+                
+            # Créer le graphique en aires empilées
+            ax.stackplot(dates, data_matrix, labels=statuses, alpha=0.8)
+            ax.legend(loc='upper left')
+            ax.set_title('Évolution des Statuts des NC (30 derniers jours)')
+            ax.set_xlabel('Date')
+            ax.set_ylabel('Nombre de NC')
+            ax.grid(True, alpha=0.3)
+            
+            plt.xticks(rotation=45)
+            plt.tight_layout()
+            
+            return fig
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la création du graphique: {e}")
+            return None
+            
+    def display_chart(self, chart_type, parent):
+        """Affiche un graphique dans l'interface"""
+        fig = None
+        if chart_type == "distribution":
+            fig = self.create_nc_distribution_chart()
+        elif chart_type == "evolution":
+            fig = self.create_status_evolution_chart()
+            
+        if fig:
+            canvas = FigureCanvasTkAgg(fig, parent)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            self.figures[chart_type] = canvas
+            return canvas
+        return None
+
+class AdvancedReportGenerator:
+    """Générateur de rapports avancés"""
+    def __init__(self, app):
+        self.app = app
+        
+    def generate_comprehensive_report(self, report_type="monthly", period=None):
+        """Génère un rapport complet avec analyse statistique"""
+        try:
+            # Déterminer la période
+            if not period:
+                if report_type == "monthly":
+                    period = (datetime.now() - timedelta(days=30), datetime.now())
+                elif report_type == "quarterly":
+                    period = (datetime.now() - timedelta(days=90), datetime.now())
+                else:
+                    period = (datetime.now() - timedelta(days=365), datetime.now())
+                    
+            # Récupérer les données
+            self.app.cursor.execute("""
+                SELECT date_nc, type_defaut, poste, gravite, statut
+                FROM NonConformite
+                WHERE date_nc BETWEEN ? AND ?
+            """, (period[0].strftime('%Y-%m-%d'), period[1].strftime('%Y-%m-%d')))
+            nc_data = self.app.cursor.fetchall()
+            
+            if not nc_data:
+                self.app.show_warning_message("Aucune donnée disponible pour cette période")
+                return None
+                
+            # Créer le rapport PDF
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("Fichier PDF", "*.pdf"), ("Tous les fichiers", "*.*")],
+                title=f"Rapport Qualité {report_type.capitalize()} - {period[0].strftime('%Y-%m-%d')} à {period[1].strftime('%Y-%m-%d')}"
+            )
+            
+            if not file_path:
+                return None
+                
+            # Créer le document PDF
+            doc = SimpleDocTemplate(file_path, pagesize=letter)
+            elements = []
+            
+            # Styles
+            styles = getSampleStyleSheet()
+            title_style = styles['Heading1']
+            section_style = styles['Heading2']
+            normal_style = styles['BodyText']
+            
+            # Titre
+            title = Paragraph(f"Rapport Qualité {report_type.capitalize()}", title_style)
+            elements.append(title)
+            elements.append(Spacer(1, 20))
+            
+            # Période
+            period_text = Paragraph(f"Période: {period[0].strftime('%d/%m/%Y')} - {period[1].strftime('%d/%m/%Y')}", normal_style)
+            elements.append(period_text)
+            elements.append(Spacer(1, 20))
+            
+            # Section 1: Résumé statistique
+            summary_title = Paragraph("1. Résumé Statistique", section_style)
+            elements.append(summary_title)
+            elements.append(Spacer(1, 10))
+            
+            # Calculer les statistiques
+            total_nc = len(nc_data)
+            ouvertes = sum(1 for nc in nc_data if nc[4] == 'Ouvert')
+            critiques = sum(1 for nc in nc_data if nc[3] == 'Critique')
+            majores = sum(1 for nc in nc_data if nc[3] == 'Majeure')
+            mineures = sum(1 for nc in nc_data if nc[3] == 'Mineure')
+            
+            # Tableau de résumé
+            summary_data = [
+                ['Métrique', 'Valeur', 'Pourcentage'],
+                ['Total NC', str(total_nc), '100%'],
+                ['NC Ouvertes', str(ouvertes), f"{(ouvertes/total_nc*100):.1f}%"],
+                ['NC Critiques', str(critiques), f"{(critiques/total_nc*100):.1f}%"],
+                ['NC Majeures', str(majores), f"{(majores/total_nc*100):.1f}%"],
+                ['NC Mineures', str(mineures), f"{(mineures/total_nc*100):.1f}%"]
+            ]
+            
+            summary_table = Table(summary_data)
+            summary_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(summary_table)
+            elements.append(Spacer(1, 20))
+            
+            # Section 2: Distribution par type de défaut
+            type_title = Paragraph("2. Distribution par Type de Défaut", section_style)
+            elements.append(type_title)
+            elements.append(Spacer(1, 10))
+            
+            # Calculer la distribution
+            type_counts = defaultdict(int)
+            for nc in nc_data:
+                type_counts[nc[1]] += 1
+                
+            type_data = [['Type de Défaut', 'Nombre', 'Pourcentage']]
+            for defect_type, count in sorted(type_counts.items(), key=lambda x: x[1], reverse=True):
+                type_data.append([defect_type, str(count), f"{(count/total_nc*100):.1f}%"])
+                
+            type_table = Table(type_data)
+            type_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(type_table)
+            elements.append(Spacer(1, 20))
+            
+            # Section 3: Distribution par poste
+            poste_title = Paragraph("3. Distribution par Poste", section_style)
+            elements.append(poste_title)
+            elements.append(Spacer(1, 10))
+            
+            # Calculer la distribution par poste
+            poste_counts = defaultdict(int)
+            for nc in nc_data:
+                poste_counts[nc[2]] += 1
+                
+            poste_data = [['Poste', 'Nombre', 'Pourcentage']]
+            for poste, count in sorted(poste_counts.items(), key=lambda x: x[1], reverse=True):
+                poste_data.append([poste, str(count), f"{(count/total_nc*100):.1f}%"])
+                
+            poste_table = Table(poste_data)
+            poste_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(poste_table)
+            elements.append(Spacer(1, 20))
+            
+            # Générer le PDF
+            doc.build(elements)
+            self.app.show_success_message(f"Rapport {report_type} généré avec succès")
+            return file_path
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la génération du rapport: {e}")
+            self.app.show_error_message(f"Impossible de générer le rapport: {e}")
+            return None
+
+class AdvancedUserManager:
+    """Gestion avancée des utilisateurs"""
+    def __init__(self, app):
+        self.app = app
+        
+    def create_user_management_view(self):
+        """Crée la vue de gestion des utilisateurs"""
+        self.app.clear_content(self.app.workspace)
+        
+        # Titre
+        title = ttk.Label(self.app.workspace, text="Gestion des Utilisateurs", 
+                       font=('Segoe UI', 24, 'bold'), foreground=self.app.colors['primary'])
+        title.pack(pady=20)
+        
+        # Cadre principal
+        main_frame = ttk.Frame(self.app.workspace)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Liste des utilisateurs
+        columns = ('ID', 'Nom', 'Rôle', 'Email', 'Dernière Connexion')
+        self.user_tree = ttk.Treeview(main_frame, columns=columns, show='headings')
+        
+        # Définir les en-têtes
+        for col in columns:
+            self.user_tree.heading(col, text=col)
+            self.user_tree.column(col, width=150, anchor='center')
+            
+        # Ajouter le treeview
+        self.user_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Charger les données
+        self.load_user_list()
+        
+        # Boutons d'action
+        button_frame = ttk.Frame(main_frame)
+        button_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(button_frame, text="➕ Ajouter Utilisateur", 
+                 command=self.show_add_user_dialog, style='TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="📝 Modifier", 
+                 command=self.show_edit_user_dialog, style='TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="🗑️ Supprimer", 
+                 command=self.delete_selected_user, style='TButton').pack(side=tk.LEFT, padx=5)
+        ttk.Button(button_frame, text="📊 Exporter", 
+                 command=self.export_users, style='TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Menu contextuel
+        self.user_tree.bind("<Button-3>", self.show_user_context_menu)
+
+    def load_user_list(self):
+        """Charge la liste des utilisateurs"""
+        # Effacer les données existantes
+        for item in self.user_tree.get_children():
+            self.user_tree.delete(item)
+            
+        # Charger les nouvelles données
+        try:
+            self.app.cursor.execute("""
+                SELECT id_user, nom, role, email, 
+                       MAX(login_time) as last_login
+                FROM Utilisateur
+                LEFT JOIN sessions ON Utilisateur.id_user = sessions.user_id
+                GROUP BY id_user, nom, role, email
+                ORDER BY nom
+            """)
+            for row in self.app.cursor.fetchall():
+                self.user_tree.insert('', 'end', values=row)
+        except Exception as e:
+            logging.error(f"Erreur lors du chargement des utilisateurs: {e}")
+            self.app.show_error_message(f"Impossible de charger les utilisateurs: {e}")
+            
+    def show_add_user_dialog(self):
+        """Affiche le dialogue d'ajout d'utilisateur"""
+        dialog = tk.Toplevel(self.app.root)
+        dialog.title("Ajouter Utilisateur")
+        dialog.geometry("400x450")
+        
+        ttk.Label(dialog, text="Ajouter un utilisateur", font=('Segoe UI', 16, 'bold')).pack(pady=20)
+        
+        # Champs du formulaire
+        ttk.Label(dialog, text="Nom d'utilisateur:").pack(pady=10)
+        username = ttk.Entry(dialog, font=('Segoe UI', 12))
+        username.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Email:").pack(pady=10)
+        email = ttk.Entry(dialog, font=('Segoe UI', 12))
+        email.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Mot de passe:").pack(pady=10)
+        password = ttk.Entry(dialog, font=('Segoe UI', 12), show="*")
+        password.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Confirmer le mot de passe:").pack(pady=10)
+        confirm_password = ttk.Entry(dialog, font=('Segoe UI', 12), show="*")
+        confirm_password.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Rôle:").pack(pady=10)
+        role = ttk.Combobox(dialog, values=["Utilisateur", "Qualité", "Production", "Maintenance", "Administrateur"], 
+                          font=('Segoe UI', 12))
+        role.set("Utilisateur")
+        role.pack(fill=tk.X, padx=20, pady=5)
+        
+        def add_user():
+            # Validation
+            if not username.get() or not email.get() or not password.get() or not confirm_password.get():
+                self.app.show_warning_message("Veuillez compléter tous les champs.")
+                return
+                
+            if password.get() != confirm_password.get():
+                self.app.show_error_message("Les mots de passe ne correspondent pas")
+                return
+                
+            # Valider la force du mot de passe
+            is_strong, message = self.app.validate_password_strength(password.get())
+            if not is_strong:
+                self.app.show_warning_message(message)
+                return
+                
+            try:
+                # Vérifier si l'utilisateur existe déjà
+                self.app.cursor.execute("SELECT * FROM Utilisateur WHERE nom = ?", (username.get(),))
+                if self.app.cursor.fetchone():
+                    self.app.show_error_message("Cet utilisateur existe déjà")
+                    return
+                    
+                # Hash du mot de passe
+                password_hash = self.app.hash_password(password.get())
+                
+                # Insérer le nouvel utilisateur
+                self.app.cursor.execute("""
+                    INSERT INTO Utilisateur (nom, role, password_hash, email)
+                    VALUES (?, ?, ?, ?)
+                """, (username.get(), role.get(), password_hash, email.get()))
+                
+                self.app.conn.commit()
+                self.app.safe_load_users()  # Recharger les utilisateurs
+                self.load_user_list()
+                
+                self.app.show_success_message("Utilisateur ajouté avec succès!")
+                dialog.destroy()
+                logging.info(f"Nouvel utilisateur ajouté: {username.get()}")
+            except sqlite3.Error as e:
+                logging.error(f"Erreur lors de l'ajout de l'utilisateur: {e}")
+                self.app.show_error_message(f"Impossible d'ajouter l'utilisateur: {e}")
+                
+        ttk.Button(dialog, text="Ajouter", command=add_user, style='TButton').pack(pady=20)
+        
+    def show_edit_user_dialog(self):
+        """Affiche le dialogue de modification d'utilisateur"""
+        selected = self.user_tree.selection()
+        if not selected:
+            self.app.show_warning_message("Veuillez sélectionner un utilisateur")
+            return
+            
+        user_data = self.user_tree.item(selected[0])['values']
+        user_id = user_data[0]
+        
+        dialog = tk.Toplevel(self.app.root)
+        dialog.title("Modifier Utilisateur")
+        dialog.geometry("400x400")
+        
+        ttk.Label(dialog, text="Modifier l'utilisateur", font=('Segoe UI', 16, 'bold')).pack(pady=20)
+        
+        # Champs du formulaire
+        ttk.Label(dialog, text="Nom d'utilisateur:").pack(pady=10)
+        username = ttk.Entry(dialog, font=('Segoe UI', 12))
+        username.insert(0, user_data[1])
+        username.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Email:").pack(pady=10)
+        email = ttk.Entry(dialog, font=('Segoe UI', 12))
+        email.insert(0, user_data[3])
+        email.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Rôle:").pack(pady=10)
+        role = ttk.Combobox(dialog, values=["Utilisateur", "Qualité", "Production", "Maintenance", "Administrateur"], 
+                          font=('Segoe UI', 12))
+        role.set(user_data[2])
+        role.pack(fill=tk.X, padx=20, pady=5)
+        
+        def update_user():
+            try:
+                self.app.cursor.execute("""
+                    UPDATE Utilisateur 
+                    SET nom = ?, role = ?, email = ?
+                    WHERE id_user = ?
+                """, (username.get(), role.get(), email.get(), user_id))
+                
+                self.app.conn.commit()
+                self.app.safe_load_users()  # Recharger les utilisateurs
+                self.load_user_list()
+                
+                self.app.show_success_message("Utilisateur mis à jour avec succès!")
+                dialog.destroy()
+                logging.info(f"Utilisateur mis à jour: {username.get()}")
+            except Exception as e:
+                logging.error(f"Erreur lors de la mise à jour de l'utilisateur: {e}")
+                self.app.show_error_message(f"Impossible de mettre à jour l'utilisateur: {e}")
+                
+        ttk.Button(dialog, text="Mettre à jour", command=update_user, style='TButton').pack(pady=20)
+        
+    def delete_selected_user(self):
+        """Supprime l'utilisateur sélectionné"""
+        selected = self.user_tree.selection()
+        if not selected:
+            self.app.show_warning_message("Veuillez sélectionner un utilisateur")
+            return
+            
+        user_data = self.user_tree.item(selected[0])['values']
+        user_id = user_data[0]
+        username = user_data[1]
+        
+        if messagebox.askyesno("Confirmation", f"Voulez-vous vraiment supprimer l'utilisateur {username}?"):
+            try:
+                self.app.cursor.execute("DELETE FROM Utilisateur WHERE id_user = ?", (user_id,))
+                self.app.conn.commit()
+                self.app.safe_load_users()  # Recharger les utilisateurs
+                self.load_user_list()
+                
+                self.app.show_success_message(f"Utilisateur {username} supprimé avec succès!")
+                logging.info(f"Utilisateur supprimé: {username}")
+            except Exception as e:
+                logging.error(f"Erreur lors de la suppression de l'utilisateur: {e}")
+                self.app.show_error_message(f"Impossible de supprimer l'utilisateur: {e}")
+                
+    def export_users(self):
+        """Exporte la liste des utilisateurs"""
+        try:
+            # Récupérer les données
+            self.app.cursor.execute("""
+                SELECT id_user, nom, role, email, 
+                       MAX(login_time) as last_login
+                FROM Utilisateur
+                LEFT JOIN sessions ON Utilisateur.id_user = sessions.user_id
+                GROUP BY id_user, nom, role, email
+                ORDER BY nom
+            """)
+            users = self.app.cursor.fetchall()
+            
+            if not users:
+                self.app.show_warning_message("Aucun utilisateur à exporter")
+                return
+                
+            # Demander le fichier d'export
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".csv",
+                filetypes=[("Fichier CSV", "*.csv"), ("Tous les fichiers", "*.*")],
+                title="Exporter les utilisateurs"
+            )
+            
+            if not file_path:
+                return
+                
+            # Écrire le fichier CSV
+            with open(file_path, 'w', newline='', encoding='utf-8') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(['ID', 'Nom', 'Rôle', 'Email', 'Dernière Connexion'])
+                writer.writerows(users)
+                
+            self.app.show_success_message(f"{len(users)} utilisateurs exportés avec succès")
+            logging.info(f"Export des utilisateurs vers {file_path}")
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de l'export des utilisateurs: {e}")
+            self.app.show_error_message(f"Impossible d'exporter les utilisateurs: {e}")
+            
+    def show_user_context_menu(self, event):
+        """Menu contextuel pour les utilisateurs"""
+        menu = tk.Menu(self.app.root, tearoff=0)
+        menu.add_command(label="Modifier", command=self.show_edit_user_dialog)
+        menu.add_command(label="Supprimer", command=self.delete_selected_user)
+        menu.post(event.x_root, event.y_root)
+
+class QTrackRiahiApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Q-TRACK by RIAHI - Management de la Qualité")
+        self.root.geometry("1400x900")
+        
+        # Charger la configuration
+        self.config = ConfigManager().config
+        self.colors = self.config['ui']['colors']
+        
+        # Variables de session
+        self.current_user = None
+        self.user_role = None
+        self.user_id = None
+        self.users = {}  # Initialisation de l'attribut users
+        self.kpi_cache = KpiCache()  # Utilisation du cache KPI amélioré
+        
+        # Initialiser les services avancés
+        self.notification_system = NotificationSystem(self)
+        self.graph_manager = GraphManager(self)
+        self.report_generator = AdvancedReportGenerator(self)
+        self.user_manager = AdvancedUserManager(self)
+        self.translation_manager = TranslationManager()
+        
+        # Connexion à la base de données avec gestion des erreurs
+        self.db_path = self.config['database']['path']
+        try:
+            self.conn = sqlite3.connect(self.db_path, timeout=self.config['database']['timeout'])
+            self.cursor = self.conn.cursor()
+        except sqlite3.Error as e:
+            messagebox.showerror("Erreur Base de Données", f"Impossible de se connecter à la base de données : {e}")
+            self.root.destroy()
+            return
+            
+        # Initialiser la base de données
+        self.initialize_database()
+        
+        # Optimiser les requêtes de base de données
+        self.optimize_database_queries()
+        
+        # Charger les utilisateurs
+        self.safe_load_users()
+        
+        # Créer les frames principaux
+        self.create_main_frames()
+        
+        # Démarrer les services en arrière-plan
+        self.start_background_services()
+        
+        # Afficher la page de connexion
+        self.show_login()
+
+    def start_background_services(self):
+        """Démarre les services en arrière-plan"""
+        try:
+            # Démarrer le système de notifications
+            self.notification_system.start_notification_service()
+            logging.info("Système de notifications démarré")
+        except Exception as e:
+            logging.error(f"Erreur lors du démarrage des services: {e}")
+
+    def get_db_path(self):
+        """Obtenir le chemin de la base de données avec gestion des chemins"""
+        try:
+            # Utiliser le chemin du script courant pour la base de données
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            db_file = os.path.join(script_dir, self.db_path)
+            return db_file
+        except Exception as e:
+            logging.error(f"Erreur lors de la récupération du chemin de la base de données: {e}")
+            return self.db_path
+
+    def execute_db_operation(self, operation, *args):
+        """Exécute une opération de base de données avec gestion des erreurs"""
+        try:
+            if operation == 'execute':
+                self.cursor.execute(*args)
+            elif operation == 'fetchall':
+                return self.cursor.fetchall()
+            elif operation == 'fetchone':
+                return self.cursor.fetchone()
+            
+            # Commit uniquement pour les opérations de modification
+            if operation in ['execute', 'insert', 'update', 'delete']:
+                self.conn.commit()
+            return True
+        except sqlite3.OperationalError as e:
+            logging.error(f"Erreur opérationnelle: {e}")
+            self.conn.rollback()
+            return False
+        except sqlite3.IntegrityError as e:
+            logging.error(f"Erreur d'intégrité: {e}")
+            self.conn.rollback()
+            return False
+        except sqlite3.Error as e:
+            logging.error(f"Erreur de base de données: {e}")
+            self.conn.rollback()
+            return False
+
+    def safe_load_users(self):
+        """Charge les utilisateurs avec gestion des erreurs"""
+        self.users = {}
+        result = self.execute_db_operation('fetchall', "SELECT id_user, nom, role, password_hash FROM Utilisateur")
+        if result:
+            for user_id, nom, role, password_hash in result:
+                self.users[nom] = {'id': user_id, 'role': role, 'password_hash': password_hash}
+
+    def optimize_database_queries(self):
+        """Optimise les requêtes de base de données"""
+        try:
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_nc_status ON NonConformite(statut)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_nc_gravite ON NonConformite(gravite)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_nc_date ON NonConformite(date_nc)")
+            self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_name ON Utilisateur(nom)")
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.warning(f"Impossible de créer les index: {e}")
+
+    def create_main_frames(self):
+        # Style personnalisé pour un look moderne et corporate
+        self.style = ttk.Style()
+        self.style.theme_use(self.config['ui']['theme'])
+        
+        # Configurer les styles avec la nouvelle palette de couleurs
+        self.style.configure('Title.TLabel', 
+                      font=('Segoe UI', 24, 'bold'), 
+                      background=self.colors['background'],
+                      foreground=self.colors['primary'])
+        
+        self.style.configure('Header.TLabel', 
+                      font=('Segoe UI', 18, 'bold'), 
+                      background=self.colors['background'],
+                      foreground=self.colors['primary'])
+        
+        self.style.configure('TButton', 
+                      font=('Segoe UI', 12), 
+                      padding=12,
+                      background=self.colors['secondary'],
+                      foreground='white')
+        
+        self.style.map('TButton',
+                background=[('active', self.colors['accent'])])
+        
+        self.style.configure('TFrame', 
+                      background=self.colors['background'])
+        
+        self.style.configure('Treeview.Heading', 
+                      font=('Segoe UI', 12, 'bold'),
+                      background=self.colors['secondary'],
+                      foreground='white')
+        
+        self.style.configure('Status.TLabel', 
+                      font=('Segoe UI', 12), 
+                      background=self.colors['info'],
+                      foreground='white')
+        
+        self.style.configure('TCombobox', 
+                      font=('Segoe UI', 12),
+                      fieldbackground='white')
+        
+        self.style.configure('TEntry', 
+                      font=('Segoe UI', 12),
+                      fieldbackground='white')
+        
+        # Cadre principal avec padding amélioré
+        main_container = ttk.Frame(self.root, padding="20")
+        main_container.pack(fill=tk.BOTH, expand=True)
+        
+        # Créer les frames principaux
+        self.login_frame = ttk.Frame(main_container)
+        self.home_frame = ttk.Frame(main_container)
+        self.work_frame = ttk.Frame(main_container)
+        
+        # Créer la barre latérale pour le dashboard
+        self.create_sidebar()
+
+    def create_sidebar(self):
+        # Barre latérale pour le dashboard
+        self.sidebar = ttk.Frame(self.work_frame, width=200, style='TFrame')
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        self.sidebar.pack_propagate(False)
+        
+        # Bouton Retour Accueil
+        ttk.Button(self.sidebar, text="🏠 Retour Accueil", command=self.show_home, style='TButton').pack(pady=20)
+        
+        # Séparateur
+        ttk.Separator(self.sidebar, orient='horizontal').pack(fill=tk.X, pady=20)
+        
+        # Zone pour les boutons de navigation dynamiques
+        self.nav_buttons_frame = ttk.Frame(self.sidebar)
+        self.nav_buttons_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Zone de travail principale
+        self.workspace = ttk.Frame(self.work_frame)
+        self.workspace.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+    def initialize_database(self):
+        """Initialise la base de données et les tables nécessaires"""
+        try:
+            # Créer la table des utilisateurs
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Utilisateur (
+                id_user INTEGER PRIMARY KEY AUTOINCREMENT,
+                nom TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                email TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+            
+            # Créer la table des audits
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS audits (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                process TEXT,
+                status TEXT,
+                user_id INTEGER,
+                FOREIGN KEY (user_id) REFERENCES Utilisateur(id_user)
+            )
+            """)
+            
+            # Créer la table des non-conformités
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS NonConformite (
+                id_nc INTEGER PRIMARY KEY AUTOINCREMENT,
+                date_nc TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                type_defaut TEXT,
+                poste TEXT,
+                gravite TEXT,
+                description TEXT,
+                statut TEXT DEFAULT 'Ouvert',
+                id_user_declarant INTEGER,
+                FOREIGN KEY (id_user_declarant) REFERENCES Utilisateur(id_user)
+            )
+            """)
+            
+            # Créer la table des analyses de causes
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS AnalyseCause (
+                id_analyse INTEGER PRIMARY KEY AUTOINCREMENT,
+                methode TEXT,
+                cause_racine TEXT,
+                id_nc INTEGER,
+                FOREIGN KEY (id_nc) REFERENCES NonConformite(id_nc)
+            )
+            """)
+            
+            # Créer la table des actions correctives
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ActionCorrective (
+                id_action INTEGER PRIMARY KEY AUTOINCREMENT,
+                description TEXT,
+                responsable TEXT,
+                delai INTEGER,
+                statut TEXT DEFAULT 'Non démarré',
+                efficacite TEXT DEFAULT 'Non évaluée',
+                id_nc INTEGER,
+                FOREIGN KEY (id_nc) REFERENCES NonConformite(id_nc)
+            )
+            """)
+            
+            # Créer la table des rapports
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS Rapport (
+                id_rapport INTEGER PRIMARY KEY AUTOINCREMENT,
+                type_rapport TEXT,
+                date_generation TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                fichier_path TEXT,
+                id_user_generateur INTEGER,
+                FOREIGN KEY (id_user_generateur) REFERENCES Utilisateur(id_user)
+            )
+            """)
+            
+            # Créer la table des sessions
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS sessions (
+                id_session INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                login_time TIMESTAMP,
+                last_activity TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES Utilisateur(id_user)
+            )
+            """)
+            
+            # Créer la table des notifications
+            self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS notifications (
+                id_notification INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                message TEXT,
+                level TEXT,
+                timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                user_id INTEGER,
+                read BOOLEAN DEFAULT FALSE,
+                FOREIGN KEY (user_id) REFERENCES Utilisateur(id_user)
+            )
+            """)
+            
+            self.conn.commit()
+            
+            # Ajouter un utilisateur administrateur par défaut si la table est vide
+            self.cursor.execute("SELECT COUNT(*) FROM Utilisateur")
+            if self.cursor.fetchone()[0] == 0:
+                password_hash = self.hash_password("admin123")
+                self.cursor.execute("INSERT INTO Utilisateur (nom, role, password_hash, email) VALUES (?, ?, ?, ?)", 
+                                 ("Admin", "Administrateur", password_hash, "admin@qtrack.com"))
+                self.conn.commit()
+                
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors de l'initialisation de la base de données: {e}")
+            messagebox.showerror("Erreur Base de Données", f"Erreur lors de l'initialisation : {e}")
+            self.root.destroy()
+
+    def hash_password(self, password):
+        """Hash le mot de passe pour le stockage sécurisé avec bcrypt"""
+        salt = bcrypt.gensalt()
+        return bcrypt.hashpw(password.encode(), salt)
+
+    def verify_password(self, password, hashed):
+        """Vérifie le mot de passe hashé"""
+        try:
+            return bcrypt.checkpw(password.encode(), hashed.encode() if isinstance(hashed, str) else hashed)
+        except Exception as e:
+            logging.error(f"Erreur lors de la vérification du mot de passe: {e}")
+            return False
+
+    def validate_password_strength(self, password):
+        """Valide la force du mot de passe"""
+        policy = self.config['security']['password_policy']
+        
+        if len(password) < policy['min_length']:
+            return False, f"Le mot de passe doit contenir au moins {policy['min_length']} caractères"
+        if policy['require_uppercase'] and not any(c.isupper() for c in password):
+            return False, "Le mot de passe doit contenir au moins une majuscule"
+        if policy['require_lowercase'] and not any(c.islower() for c in password):
+            return False, "Le mot de passe doit contenir au moins une minuscule"
+        if policy['require_digit'] and not any(c.isdigit() for c in password):
+            return False, "Le mot de passe doit contenir au moins un chiffre"
+        if policy['require_special'] and not any(c in "!@#$%^&*()_+-=[]{}|;:'\",.<>/?`~" for c in password):
+            return False, "Le mot de passe doit contenir au moins un caractère spécial"
+        return True, "Mot de passe fort"
+
+    def show_success_message(self, message, title="Succès"):
+        """Affiche un message de succès stylisé"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("300x150")
+        dialog.configure(bg=self.colors['success'])
+        
+        ttk.Label(dialog, text=message, font=('Segoe UI', 12), 
+                 foreground='white', background=self.colors['success']).pack(pady=20)
+        
+        ttk.Button(dialog, text="OK", command=dialog.destroy, 
+                  style='TButton').pack(pady=10)
+        
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.wait_window()
+
+    def show_error_message(self, message, title="Erreur"):
+        """Affiche un message d'erreur stylisé"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("300x150")
+        dialog.configure(bg=self.colors['danger'])
+        
+        ttk.Label(dialog, text=message, font=('Segoe UI', 12), 
+                 foreground='white', background=self.colors['danger']).pack(pady=20)
+        
+        ttk.Button(dialog, text="OK", command=dialog.destroy, 
+                  style='TButton').pack(pady=10)
+        
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.wait_window()
+
+    def show_warning_message(self, message, title="Avertissement"):
+        """Affiche un message d'avertissement stylisé"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.geometry("300x150")
+        dialog.configure(bg=self.colors['warning'])
+        
+        ttk.Label(dialog, text=message, font=('Segoe UI', 12), 
+                 foreground='white', background=self.colors['warning']).pack(pady=20)
+        
+        ttk.Button(dialog, text="OK", command=dialog.destroy, 
+                  style='TButton').pack(pady=10)
+        
+        dialog.transient(self.root)
+        dialog.grab_set()
+        dialog.wait_window()
+
+    def add_audit_trail(self, action, details):
+        """Ajoute une trace d'audit pour la sécurité et le suivi"""
+        try:
+            self.cursor.execute("""
+                INSERT INTO audits (process, status, user_id)
+                VALUES (?, ?, ?)
+            """, (action, details, self.user_id))
+            self.conn.commit()
+            logging.info(f"Audit trail: {action} - {details}")
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors de l'ajout de la trace d'audit: {e}")
+
+    def clear_content(self, frame):
+        # Nettoie le cadre de contenu
+        for widget in frame.winfo_children():
+            widget.destroy()
+
+    def show_login(self):
+        # Masquer les autres frames et afficher la page de connexion
+        self.home_frame.pack_forget()
+        self.work_frame.pack_forget()
+        self.login_frame.pack(fill=tk.BOTH, expand=True)
+        self.clear_content(self.login_frame)
+        self.create_login_page()
+
+    def show_home(self):
+        # Masquer le dashboard et afficher la page d'accueil
+        self.work_frame.pack_forget()
+        self.login_frame.pack_forget()
+        self.home_frame.pack(fill=tk.BOTH, expand=True)
+        self.clear_content(self.home_frame)
+        self.create_home_page()
+
+    def show_dashboard(self, module_name=None):
+        # Masquer la page d'accueil et afficher le dashboard
+        self.home_frame.pack_forget()
+        self.work_frame.pack(fill=tk.BOTH, expand=True)
+        self.clear_content(self.workspace)
+        
+        # Mettre à jour le menu de la sidebar en fonction du module
+        self.update_sidebar_menu(module_name)
+        
+        # Afficher la vue correspondante
+        if module_name == "tableau_bord":
+            self.create_dashboard_view()
+        elif module_name == "nc_operations":
+            self.create_nc_operations_view()
+        elif module_name == "analyse_pilotage":
+            self.create_analysis_pilotage_view()
+        elif module_name == "system_audit":
+            self.create_system_audit_view()
+        elif module_name == "reports":
+            self.create_reports_view()
+        elif module_name == "settings":
+            self.create_settings_view()
+        elif module_name == "notifications":
+            self.notification_system.create_notification_window()
+        elif module_name == "graphs":
+            self.create_graphs_view()
+        elif module_name == "user_management":
+            self.user_manager.create_user_management_view()
+        else:
+            self.create_nc_operations_view()  # Vue par défaut
+
+    def update_sidebar_menu(self, module_name=None):
+        """Met à jour le menu de la sidebar en fonction du module sélectionné"""
+        # Nettoyer les anciens boutons
+        for widget in self.nav_buttons_frame.winfo_children():
+            widget.destroy()
+        
+        # Définir les boutons en fonction du module
+        if module_name == "tableau_bord":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "nc_operations":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "analyse_pilotage":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "system_audit":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "reports":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "settings":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "graphs":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "notifications":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        elif module_name == "user_management":
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        else:
+            nav_buttons = [
+                ("📊 Tableau de Bord", lambda: self.show_dashboard("tableau_bord")),
+                ("📝 Opérations Qualité", lambda: self.show_dashboard("nc_operations")),
+                ("📈 Analyse & Pilotage", lambda: self.show_dashboard("analyse_pilotage")),
+                ("📊 Graphiques", lambda: self.show_dashboard("graphs")),
+                ("📊 Rapports", lambda: self.show_dashboard("reports")),
+                ("🔔 Notifications", lambda: self.show_dashboard("notifications")),
+                ("👥 Gestion Utilisateurs", lambda: self.show_dashboard("user_management")),
+                ("⚙️ Paramètres", lambda: self.show_dashboard("settings"))
+            ]
+        
+        # Créer les nouveaux boutons
+        for text, command in nav_buttons:
+            btn = ttk.Button(self.nav_buttons_frame, text=text, command=command, style='TButton')
+            btn.pack(pady=10, fill=tk.X)
+
+    def create_login_page(self):
+        # Cadre de connexion
+        login_container = ttk.Frame(self.login_frame, padding="50")
+        login_container.pack(expand=True)
+        
+        # Titre
+        title = ttk.Label(login_container, text="Q-TRACK by RIAHI", 
+                        font=('Segoe UI', 28, 'bold'), foreground=self.colors['primary'])
+        title.pack(pady=30)
+        
+        # Sous-titre
+        subtitle = ttk.Label(login_container, text=self.translation_manager.get_translation("login_title"), 
+                          font=('Segoe UI', 14), foreground=self.colors['text_light'])
+        subtitle.pack(pady=10)
+        
+        # Champ utilisateur
+        ttk.Label(login_container, text=self.translation_manager.get_translation("username")).pack(pady=10)
+        self.username_entry = ttk.Entry(login_container, font=('Segoe UI', 12))
+        self.username_entry.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Champ mot de passe
+        ttk.Label(login_container, text=self.translation_manager.get_translation("password")).pack(pady=10)
+        self.password_entry = ttk.Entry(login_container, font=('Segoe UI', 12), show="*")
+        self.password_entry.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Bouton de connexion
+        ttk.Button(login_container, text=self.translation_manager.get_translation("login"), command=self.authenticate_user, style='TButton').pack(pady=20)
+        
+        # Lien inscription
+        register_link = ttk.Label(login_container, text=self.translation_manager.get_translation("register"), 
+                              foreground=self.colors['secondary'], cursor="hand2")
+        register_link.pack(pady=10)
+        register_link.bind("<Button-1>", self.show_register)
+
+    def authenticate_user(self):
+        """Authentifie l'utilisateur"""
+        username = self.username_entry.get()
+        password = self.password_entry.get()
+        
+        if not username or not password:
+            self.show_warning_message("Veuillez compléter tous les champs.")
+            return
+        
+        if username in self.users:
+            user_data = self.users[username]
+            if self.verify_password(password, user_data['password_hash']):
+                self.current_user = username
+                self.user_role = user_data['role']
+                self.user_id = user_data['id']
+                self.save_user_session()
+                self.add_audit_trail("Connexion", f"Utilisateur {username} connecté")
+                self.show_dashboard()
+                self.show_success_message(f"Bienvenue {username}!")
+                logging.info(f"Utilisateur {username} connecté avec succès")
+            else:
+                self.show_error_message("Mot de passe incorrect")
+                logging.warning(f"Tentative de connexion échouée pour {username}")
+        else:
+            self.show_error_message("Utilisateur non trouvé")
+
+    def show_register(self, event=None):
+        """Affiche le formulaire d'inscription"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Créer un compte")
+        dialog.geometry("400x450")
+        
+        ttk.Label(dialog, text="Création de compte", font=('Segoe UI', 16, 'bold')).pack(pady=20)
+        
+        # Champ nom utilisateur
+        ttk.Label(dialog, text="Nom d'utilisateur:").pack(pady=10)
+        reg_username = ttk.Entry(dialog, font=('Segoe UI', 12))
+        reg_username.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Champ email
+        ttk.Label(dialog, text="Email:").pack(pady=10)
+        reg_email = ttk.Entry(dialog, font=('Segoe UI', 12))
+        reg_email.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Champ mot de passe
+        ttk.Label(dialog, text="Mot de passe:").pack(pady=10)
+        reg_password = ttk.Entry(dialog, font=('Segoe UI', 12), show="*")
+        reg_password.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Champ confirmation mot de passe
+        ttk.Label(dialog, text="Confirmer le mot de passe:").pack(pady=10)
+        reg_confirm_password = ttk.Entry(dialog, font=('Segoe UI', 12), show="*")
+        reg_confirm_password.pack(fill=tk.X, padx=20, pady=5)
+        
+        # Champ rôle
+        ttk.Label(dialog, text="Rôle:").pack(pady=10)
+        reg_role = ttk.Combobox(dialog, values=["Utilisateur", "Qualité", "Production", "Maintenance", "Administrateur"], 
+                            font=('Segoe UI', 12))
+        reg_role.set("Utilisateur")
+        reg_role.pack(fill=tk.X, padx=20, pady=5)
+        
+        def register_user():
+            username = reg_username.get()
+            email = reg_email.get()
+            password = reg_password.get()
+            confirm_password = reg_confirm_password.get()
+            role = reg_role.get()
+
+            if not username or not email or not password or not confirm_password:
+                self.show_warning_message("Veuillez compléter tous les champs.")
+                return
+            
+            if password != confirm_password:
+                self.show_error_message("Les mots de passe ne correspondent pas")
+                return
+            
+            # Valider la force du mot de passe
+            is_strong, message = self.validate_password_strength(password)
+            if not is_strong:
+                self.show_warning_message(message)
+                return
+            
+            try:
+                # Vérifier si l'utilisateur existe déjà
+                self.cursor.execute("SELECT * FROM Utilisateur WHERE nom = ?", (username,))
+                if self.cursor.fetchone():
+                    self.show_error_message("Cet utilisateur existe déjà")
+                    return
+                    
+                # Hash du mot de passe
+                password_hash = self.hash_password(password)
+                
+                # Insérer le nouvel utilisateur
+                self.cursor.execute("""
+                    INSERT INTO Utilisateur (nom, role, password_hash, email)
+                    VALUES (?, ?, ?, ?)
+                """, (username, role, password_hash, email))
+                
+                self.conn.commit()
+                self.safe_load_users()  # Recharger les utilisateurs
+                
+                self.show_success_message("Compte créé avec succès! Vous pouvez maintenant vous connecter.")
+                dialog.destroy()
+                logging.info(f"Nouvel utilisateur créé: {username}")
+            except sqlite3.Error as e:
+                logging.error(f"Erreur lors de la création de l'utilisateur: {e}")
+                self.show_error_message(f"Impossible de créer le compte: {e}")
+        
+        ttk.Button(dialog, text="S'inscrire", command=register_user, style='TButton').pack(pady=20)
+    def create_home_page(self):
+        # Bandeau de bienvenue avec dégradé
+        welcome_frame = tk.Frame(self.home_frame, bg=self.colors['primary'])
+        welcome_frame.pack(fill=tk.X, pady=(0, 30))
+        
+        # Texte du bandeau
+        welcome_title = tk.Label(welcome_frame, text="Q-TRACK by RIAHI", font=('Segoe UI', 28, 'bold'), 
+                              fg='white', bg=self.colors['primary'])
+        welcome_title.pack(pady=20)
+        
+        # Informations dynamiques
+        current_date = datetime.now().strftime("%d/%m/%Y")
+        welcome_subtitle = tk.Label(welcome_frame, text=f"Bonjour {self.current_user}, nous sommes le {current_date}", 
+                                 font=('Segoe UI', 16), fg='white', bg=self.colors['primary'])
+        welcome_subtitle.pack(pady=5)
+        
+        # Grille de sélection (Main Grid)
+        grid_frame = tk.Frame(self.home_frame, bg=self.colors['background'])
+        grid_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Titre de la grille
+        grid_title = tk.Label(grid_frame, text="Sélectionnez votre module", font=('Segoe UI', 20, 'bold'), 
+                           fg=self.colors['primary'], bg=self.colors['background'])
+        grid_title.pack(pady=20)
+        
+        # Créer les trois cartes
+        self.create_home_cards(grid_frame)
+
+    def create_home_cards(self, parent):
+        # Créer un frame pour contenir les trois cartes en ligne
+        cards_container = tk.Frame(parent, bg=self.colors['background'])
+        cards_container.pack(fill=tk.X, pady=20)
+        
+        # Créer les trois cartes interactives
+        cards = [
+            {
+                "title": self.translation_manager.get_translation("nc_operations"),
+                "icon": "📝",
+                "description": "Déclaration de NC, Registre, Suivi Terrain",
+                "color": self.colors['secondary'],
+                "command": lambda: self.show_dashboard("nc_operations")
+            },
+            {
+                "title": self.translation_manager.get_translation("analysis_pilotage"),
+                "icon": "📈", 
+                "description": "5 Pourquoi, Ishikawa, KPI & Statistiques",
+                "color": self.colors['accent'],
+                "command": lambda: self.show_dashboard("analyse_pilotage")
+            },
+            {
+                "title": self.translation_manager.get_translation("system_audit"),
+                "icon": "🛡️",
+                "description": "GED, Plan d'audit, Actions Correctives", 
+                "color": self.colors['warning'],
+                "command": lambda: self.show_dashboard("system_audit")
+            }
+        ]
+        
+        # Créer les cartes
+        for card_data in cards:
+            card_frame = tk.Frame(cards_container, bg='white', relief=tk.RAISED, borderwidth=2)
+            card_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH, padx=30, pady=20)
+            
+            # Contenu de la carte
+            icon_label = tk.Label(card_frame, text=card_data["icon"], font=('Segoe UI', 48), bg='white', fg=card_data["color"])
+            icon_label.pack(pady=30)
+            
+            title_label = tk.Label(card_frame, text=card_data["title"], font=('Segoe UI', 18, 'bold'), 
+                                bg='white', fg=card_data["color"])
+            title_label.pack(pady=10)
+            
+            desc_label = tk.Label(card_frame, text=card_data["description"], font=('Segoe UI', 14), 
+                               bg='white', fg=self.colors['text_light'])
+            desc_label.pack(pady=5)
+            
+            # Lier le clic à la commande
+            card_frame.bind("<Button-1>", lambda e, cmd=card_data["command"]: cmd())
+            card_frame.configure(cursor="hand2")
+            
+            # Ajouter un effet de survol
+            def on_enter(e, frame=card_frame, icon=icon_label, title=title_label, desc=desc_label, color=card_data["color"]):
+                frame.configure(background=color)
+                icon.configure(fg='white')
+                title.configure(fg='white')
+                desc.configure(fg='white')
+            
+            def on_leave(e, frame=card_frame, icon=icon_label, title=title_label, desc=desc_label, color=card_data["color"]):
+                frame.configure(background='white')
+                icon.configure(fg=color)
+                title.configure(fg=color)
+                desc.configure(fg=self.colors['text_light'])
+            
+            card_frame.bind("<Enter>", on_enter)
+            card_frame.bind("<Leave>", on_leave)
+
+    # --- VUES DU DASHBOARD ---
+
+    def create_dashboard_view(self):
+        """Nouvelle vue : Tableau de Bord Interactif (DMAIC - Measure & Control)"""
+        self.clear_content(self.workspace)
+
+        # Titre de la vue
+        title = ttk.Label(
+            self.workspace,
+            text="Tableau de Bord Qualité – Pilotage DMAIC",
+            font=('Segoe UI', 24, 'bold'),
+            foreground=self.colors['primary']
+        )
+        title.pack(pady=20)
+
+        # Filtres
+        filter_frame = ttk.Frame(self.workspace)
+        filter_frame.pack(fill=tk.X, padx=20, pady=10)
+
+        ttk.Label(filter_frame, text="Statut").pack(side=tk.LEFT, padx=5)
+        self.filter_status = ttk.Combobox(
+            filter_frame,
+            values=["Tous", "Ouvert", "En analyse", "Action lancée", "Clos"],
+            width=15
+        )
+        self.filter_status.set("Tous")
+        self.filter_status.pack(side=tk.LEFT, padx=5)
+
+        ttk.Label(filter_frame, text="Gravité").pack(side=tk.LEFT, padx=5)
+        self.filter_gravite = ttk.Combobox(
+            filter_frame,
+            values=["Toutes", "Mineure", "Majeure", "Critique"],
+            width=15
+        )
+        self.filter_gravite.set("Toutes")
+        self.filter_gravite.pack(side=tk.LEFT, padx=5)
+
+        ttk.Button(
+            filter_frame,
+            text="Appliquer",
+            command=self.refresh_dashboard
+        ).pack(side=tk.LEFT, padx=10)
+
+        # Zone KPI
+        self.kpi_container = ttk.Frame(self.workspace)
+        self.kpi_container.pack(fill=tk.X, padx=20, pady=20)
+
+        # Initialiser le tableau de bord
+        self.refresh_dashboard()
+
+    def refresh_dashboard(self):
+        """Rafraîchissement dynamique des KPI"""
+        # Nettoyer les KPI existants
+        for widget in self.kpi_container.winfo_children():
+            widget.destroy()
+
+        # Récupérer les filtres
+        statut = self.filter_status.get()
+        gravite = self.filter_gravite.get()
+
+        # Utiliser le cache pour optimiser les requêtes
+        current_filters = (statut, gravite)
+        if current_filters not in self.kpi_cache.cache:
+            # Construire la requête avec les filtres
+            query = "SELECT statut, gravite FROM NonConformite WHERE 1=1"
+            params = []
+
+            if statut != "Tous":
+                query += " AND statut=?"
+                params.append(statut)
+
+            if gravite != "Toutes":
+                query += " AND gravite=?"
+                params.append(gravite)
+
+            # Exécuter la requête
+            result = self.execute_db_operation('fetchall', query, *params)
+            self.kpi_cache.set(current_filters, result if result else [])
+        
+        rows = self.kpi_cache.get(current_filters)
+
+        # Calculer les KPI
+        total = len(rows)
+        ouvertes = sum(1 for r in rows if r[0] == "Ouvert")
+        critiques = sum(1 for r in rows if r[1] == "Critique")
+        closes = sum(1 for r in rows if r[0] == "Clos")
+        en_analyse = sum(1 for r in rows if r[0] == "En analyse")
+        action_lancee = sum(1 for r in rows if r[0] == "Action lancée")
+
+        # Créer les cartes KPI
+        self.create_kpi_card(self.translation_manager.get_translation("total_nc"), total, self.colors['info'])
+        self.create_kpi_card(self.translation_manager.get_translation("nc_ouvertes"), ouvertes, self.colors['danger'])
+        self.create_kpi_card(self.translation_manager.get_translation("nc_critiques"), critiques, self.colors['warning'])
+        self.create_kpi_card(self.translation_manager.get_translation("nc_cloturees"), closes, self.colors['success'])
+        self.create_kpi_card(self.translation_manager.get_translation("en_analyse"), en_analyse, self.colors['accent'])
+        self.create_kpi_card(self.translation_manager.get_translation("action_lancee"), action_lancee, self.colors['secondary'])
+
+    def create_kpi_card(self, title, value, color):
+        """Crée une carte KPI cliquable"""
+        card = tk.Frame(
+            self.kpi_container,
+            bg=color,
+            width=250,
+            height=120,
+            cursor="hand2"
+        )
+        card.pack(side=tk.LEFT, padx=15, pady=10)
+        card.pack_propagate(False)
+
+        # Contenu de la carte
+        tk.Label(
+            card,
+            text=title,
+            font=('Segoe UI', 14, 'bold'),
+            fg='white',
+            bg=color
+        ).pack(pady=15)
+
+        tk.Label(
+            card,
+            text=str(value),
+            font=('Segoe UI', 28, 'bold'),
+            fg='white',
+            bg=color
+        ).pack()
+
+        # Lier le clic à la fonction de filtrage
+        card.bind("<Button-1>", lambda e, t=title, v=value, c=color: self.filter_by_kpi(t, v, c))
+
+    def filter_by_kpi(self, title, value, color):
+        """Filtrage par KPI cliqué"""
+        if title == self.translation_manager.get_translation("total_nc"):
+            # Réinitialiser les filtres
+            self.filter_status.set("Tous")
+            self.filter_gravite.set("Toutes")
+        elif title == self.translation_manager.get_translation("nc_ouvertes"):
+            self.filter_status.set("Ouvert")
+            self.filter_gravite.set("Toutes")
+        elif title == self.translation_manager.get_translation("nc_critiques"):
+            self.filter_status.set("Tous")
+            self.filter_gravite.set("Critique")
+        elif title == self.translation_manager.get_translation("nc_cloturees"):
+            self.filter_status.set("Clos")
+            self.filter_gravite.set("Toutes")
+        elif title == self.translation_manager.get_translation("en_analyse"):
+            self.filter_status.set("En analyse")
+            self.filter_gravite.set("Toutes")
+        elif title == self.translation_manager.get_translation("action_lancee"):
+            self.filter_status.set("Action lancée")
+            self.filter_gravite.set("Toutes")
+        
+        # Appliquer le filtrage
+        self.refresh_dashboard()
+
+    # --- VUES DES MODULES ---
+
+    def create_nc_operations_view(self):
+        # S'assurer que le workspace est visible
+        self.workspace.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre de la vue
+        title = ttk.Label(self.workspace, text="Opérations Qualité", font=('Segoe UI', 24, 'bold'), 
+                       foreground=self.colors['primary'])
+        title.pack(pady=20)
+        
+        # Barre de recherche
+        search_frame = ttk.Frame(self.workspace)
+        search_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(search_frame, text="Recherche:", font=('Segoe UI', 12)).pack(side=tk.LEFT, padx=5)
+        search_entry = ttk.Entry(search_frame, font=('Segoe UI', 12), width=50)
+        search_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(search_frame, text="🔍", style='TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Bouton pour déclarer une NC
+        ttk.Button(
+            self.workspace,
+            text="➕ Déclarer une Non-Conformité",
+            command=self.open_nc_form,
+            style='TButton'
+        ).pack(pady=10)
+        
+        # Bouton d'export
+        ttk.Button(
+            self.workspace,
+            text="📊 Exporter NC (Excel)",
+            command=self.export_nc_to_excel,
+            style='TButton'
+        ).pack(pady=5)
+        
+        # Tableau des NC
+        self.create_nc_table()
+
+    def create_analysis_pilotage_view(self):
+        # S'assurer que le workspace est visible
+        self.workspace.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre de la vue
+        title = ttk.Label(self.workspace, text="Analyse & Pilotage", font=('Segoe UI', 24, 'bold'), 
+                       foreground=self.colors['primary'])
+        title.pack(pady=20)
+        
+        # Barre de recherche
+        search_frame = ttk.Frame(self.workspace)
+        search_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(search_frame, text="Recherche:", font=('Segoe UI', 12)).pack(side=tk.LEFT, padx=5)
+        search_entry = ttk.Entry(search_frame, font=('Segoe UI', 12), width=50)
+        search_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(search_frame, text="🔍", style='TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Tableau des analyses
+        self.create_analysis_table()
+
+    def create_system_audit_view(self):
+        # S'assurer que le workspace est visible
+        self.workspace.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre de vue
+        title = ttk.Label(self.workspace, text="Système & Audit", font=('Segoe UI', 24, 'bold'), 
+                       foreground=self.colors['primary'])
+        title.pack(pady=20)
+        
+        # Barre de recherche
+        search_frame = ttk.Frame(self.workspace)
+        search_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        ttk.Label(search_frame, text="Recherche:", font=('Segoe UI', 12)).pack(side=tk.LEFT, padx=5)
+        search_entry = ttk.Entry(search_frame, font=('Segoe UI', 12), width=50)
+        search_entry.pack(side=tk.LEFT, padx=5)
+        ttk.Button(search_frame, text="🔍", style='TButton').pack(side=tk.LEFT, padx=5)
+        
+        # Tableau des audits
+        self.create_audit_table()
+
+    def create_reports_view(self):
+        # S'assurer que le workspace est visible
+        self.workspace.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre de vue
+        title = ttk.Label(self.workspace, text="Rapports", font=('Segoe UI', 24, 'bold'), 
+                       foreground=self.colors['primary'])
+        title.pack(pady=20)
+        
+        # Types de rapports
+        report_types = [
+            ("Rapport NC Mensuel", self.generate_monthly_nc_report),
+            ("Rapport Actions Correctives", self.generate_action_report),
+            ("Rapport Synthèse Qualité", self.generate_quality_summary),
+            ("Rapport Complet", self.report_generator.generate_comprehensive_report)
+        ]
+        
+        for report_name, command in report_types:
+            ttk.Button(
+                self.workspace,
+                text=report_name,
+                command=command,
+                style='TButton'
+            ).pack(pady=5, fill=tk.X, padx=50)
+
+    def create_settings_view(self):
+        # S'assurer que le workspace est visible
+        self.workspace.pack(fill=tk.BOTH, expand=True)
+        
+        # Titre de vue
+        title = ttk.Label(self.workspace, text="Paramètres", font=('Segoe UI', 24, 'bold'), 
+                       foreground=self.colors['primary'])
+        title.pack(pady=20)
+        
+        # Informations système
+        info_frame = ttk.LabelFrame(self.workspace, text="Informations Système", padding="10")
+        info_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Label(info_frame, text=f"Version: 2.0.0").pack(anchor=tk.W)
+        ttk.Label(info_frame, text=f"Base de données: {self.db_path}").pack(anchor=tk.W)
+        ttk.Label(info_frame, text=f"Utilisateur: {self.current_user}").pack(anchor=tk.W)
+        ttk.Label(info_frame, text=f"Rôle: {self.user_role}").pack(anchor=tk.W)
+        
+        # Boutons d'actions
+        action_frame = ttk.Frame(self.workspace)
+        action_frame.pack(fill=tk.X, padx=20, pady=20)
+        
+        ttk.Button(
+            action_frame,
+            text="📊 Exporter Base de Données",
+            command=self.export_database,
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            action_frame,
+            text="🔄 Sauvegarder",
+            command=self.backup_database,
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            action_frame,
+            text="🗑️ Vider Base de Données",
+            command=self.clear_database,
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Déconnexion
+        ttk.Button(
+            action_frame,
+            text="🚪 Déconnexion",
+            command=self.logout,
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Paramètres utilisateur
+        user_settings_frame = ttk.LabelFrame(self.workspace, text="Paramètres Utilisateur", padding="10")
+        user_settings_frame.pack(fill=tk.X, padx=20, pady=10)
+        
+        ttk.Button(
+            user_settings_frame,
+            text="🔐 Changer le mot de passe",
+            command=self.show_password_change_dialog,
+            style='TButton'
+        ).pack(fill=tk.X, pady=5)
+        
+        ttk.Button(
+            user_settings_frame,
+            text="🌐 Changer la langue",
+            command=self.show_language_settings,
+            style='TButton'
+        ).pack(fill=tk.X, pady=5)
+
+    def create_graphs_view(self):
+        """Vue des graphiques avancés"""
+        self.clear_content(self.workspace)
+        
+        # Titre
+        title = ttk.Label(self.workspace, text="Analyse Graphique", font=('Segoe UI', 24, 'bold'), 
+                       foreground=self.colors['primary'])
+        title.pack(pady=20)
+        
+        # Cadre des graphiques
+        graphs_frame = ttk.Frame(self.workspace)
+        graphs_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=10)
+        
+        # Options de graphiques
+        options_frame = ttk.Frame(graphs_frame)
+        options_frame.pack(fill=tk.X, pady=10)
+        
+        ttk.Button(
+            options_frame,
+            text="📊 Distribution par Gravité",
+            command=lambda: self.graph_manager.display_chart("distribution", graphs_frame),
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            options_frame,
+            text="📈 Évolution des Statuts",
+            command=lambda: self.graph_manager.display_chart("evolution", graphs_frame),
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        ttk.Button(
+            options_frame,
+            text="🔄 Rafraîchir",
+            command=lambda: self.clear_content(graphs_frame),
+            style='TButton'
+        ).pack(side=tk.LEFT, padx=5)
+        
+        # Zone pour les graphiques
+        self.graph_container = ttk.Frame(graphs_frame)
+        self.graph_container.pack(fill=tk.BOTH, expand=True)
+
+    def show_password_change_dialog(self):
+        """Affiche le dialogue de changement de mot de passe"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Changer le mot de passe")
+        dialog.geometry("400x300")
+        
+        ttk.Label(dialog, text="Changer le mot de passe", font=('Segoe UI', 16, 'bold')).pack(pady=20)
+        
+        ttk.Label(dialog, text="Ancien mot de passe:").pack(pady=10)
+        old_password = ttk.Entry(dialog, show="*")
+        old_password.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Nouveau mot de passe:").pack(pady=10)
+        new_password = ttk.Entry(dialog, show="*")
+        new_password.pack(fill=tk.X, padx=20, pady=5)
+        
+        ttk.Label(dialog, text="Confirmer:").pack(pady=10)
+        confirm_password = ttk.Entry(dialog, show="*")
+        confirm_password.pack(fill=tk.X, padx=20, pady=5)
+        
+        def change_password():
+            old_pwd = old_password.get()
+            new_pwd = new_password.get()
+            confirm_pwd = confirm_password.get()
+            
+            if not old_pwd or not new_pwd or not confirm_pwd:
+                self.show_warning_message("Veuillez compléter tous les champs.")
+                return
+            
+            if new_pwd != confirm_pwd:
+                self.show_error_message("Les mots de passe ne correspondent pas")
+                return
+            
+            # Valider la force du mot de passe
+            is_strong, message = self.validate_password_strength(new_pwd)
+            if not is_strong:
+                self.show_warning_message(message)
+                return
+            
+            try:
+                # Vérifier l'ancien mot de passe
+                user_data = self.users[self.current_user]
+                if not self.verify_password(old_pwd, user_data['password_hash']):
+                    self.show_error_message("Ancien mot de passe incorrect")
+                    return
+                
+                # Hash du nouveau mot de passe
+                password_hash = self.hash_password(new_pwd)
+                
+                # Mettre à jour le mot de passe
+                self.cursor.execute("""
+                    UPDATE Utilisateur SET password_hash = ? WHERE id_user = ?
+                """, (password_hash, self.user_id))
+                
+                self.conn.commit()
+                self.safe_load_users()  # Recharger les utilisateurs
+                
+                self.show_success_message("Mot de passe changé avec succès!")
+                dialog.destroy()
+                logging.info(f"Mot de passe changé pour {self.current_user}")
+            except sqlite3.Error as e:
+                logging.error(f"Erreur lors du changement de mot de passe: {e}")
+                self.show_error_message(f"Impossible de changer le mot de passe: {e}")
+        
+        ttk.Button(dialog, text="Changer le mot de passe", command=change_password, style='TButton').pack(pady=20)
+
+    def show_language_settings(self):
+        """Affiche les paramètres de langue"""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Paramètres de langue")
+        dialog.geometry("300x150")
+        
+        ttk.Label(dialog, text="Sélectionner la langue", font=('Segoe UI', 14)).pack(pady=20)
+        
+        language_var = tk.StringVar(value=self.translation_manager.current_language)
+        # Corriger la syntaxe de la ligne avec le Combobox
+        language_combo = ttk.Combobox(
+            dialog, 
+            textvariable=language_var, 
+            values=["fr", "en"], 
+            font=('Segoe UI', 12)
+        )
+        language_combo.pack(fill=tk.X, padx=20, pady=10)
+        
+        def apply_language():
+            self.translation_manager.current_language = language_var.get()
+            dialog.destroy()
+            self.show_success_message(f"Langue changée à {language_var.get()}")
+        
+        ttk.Button(dialog, text="Appliquer", command=apply_language, style='TButton').pack(pady=10)
+
+    # --- FONCTIONS DE DÉCLARATION ET GESTION DES NC ---
+
+    def open_nc_form(self):
+        """Ouvre le formulaire de déclaration de Non-Conformité"""
+        if self.user_role not in ["Administrateur", "Qualité"]:
+            self.show_warning_message("Accès refusé", "Vous n'avez pas les droits nécessaires pour déclarer une NC")
+            return
+            
+        form = tk.Toplevel(self.root)
+        form.title("Déclaration de Non-Conformité")
+        form.geometry("500x500")
+
+        ttk.Label(form, text="Type de défaut").pack(pady=5)
+        type_defaut = ttk.Entry(form)
+        type_defaut.pack(fill=tk.X, padx=20)
+
+        ttk.Label(form, text="Poste").pack(pady=5)
+        poste = ttk.Entry(form)
+        poste.pack(fill=tk.X, padx=20)
+
+        ttk.Label(form, text="Gravité").pack(pady=5)
+        gravite = ttk.Combobox(form, values=["Mineure", "Majeure", "Critique"])
+        gravite.pack(fill=tk.X, padx=20)
+
+        ttk.Label(form, text="Description").pack(pady=5)
+        description = scrolledtext.ScrolledText(form, height=5)
+        description.pack(fill=tk.BOTH, padx=20)
+
+        ttk.Button(
+            form,
+            text="Enregistrer",
+            command=lambda: self.save_nc(
+                type_defaut.get(),
+                poste.get(),
+                gravite.get(),
+                description.get("1.0", tk.END),
+                form
+            )
+        ).pack(pady=15)
+
+    def save_nc(self, type_defaut, poste, gravite, description, window):
+        """Enregistre la Non-Conformité de manière sécurisée"""
+        if not type_defaut or not poste or not gravite:
+            self.show_warning_message("Champs obligatoires", "Veuillez compléter tous les champs.")
+            return
+
+        try:
+            self.cursor.execute("""
+                INSERT INTO NonConformite (type_defaut, poste, gravite, description, statut, id_user_declarant)
+                VALUES (?, ?, ?, ?, 'Ouvert', ?)
+            """, (type_defaut, poste, gravite, description, self.user_id))
+            
+            self.conn.commit()
+            self.load_nc_list()
+            window.destroy()
+            self.show_success_message("Non-Conformité enregistrée avec succès!")
+            self.add_audit_trail("Déclaration NC", f"NC enregistrée par {self.current_user}")
+            logging.info(f"NC enregistrée par {self.current_user}")
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors de l'enregistrement de la NC: {e}")
+            self.show_error_message(f"Impossible d'enregistrer la NC : {e}")
+
+    def add_cause_analysis(self, id_nc):
+        """Ajoute une analyse de cause à une NC"""
+        win = tk.Toplevel(self.root)
+        win.title("Analyse de cause")
+
+        ttk.Label(win, text="Méthode d'analyse").pack(pady=5)
+        methode = ttk.Combobox(win, values=["5 Pourquoi", "Ishikawa"])
+        methode.pack(fill=tk.X, padx=20)
+
+        ttk.Label(win, text="Cause racine identifiée").pack(pady=5)
+        cause = scrolledtext.ScrolledText(win, height=4)
+        cause.pack(fill=tk.BOTH, padx=20, pady=5)
+
+        ttk.Button(
+            win,
+            text="Enregistrer",
+            command=lambda: self.save_cause(id_nc, methode.get(), cause.get("1.0", tk.END), win)
+        ).pack(pady=10)
+
+    def save_cause(self, id_nc, methode, cause_racine, window):
+        """Enregistre l'analyse de cause"""
+        if not methode or not cause_racine.strip():
+            self.show_warning_message("Champs obligatoires", "Veuillez compléter tous les champs.")
+            return
+
+        try:
+            self.cursor.execute("""
+                INSERT INTO AnalyseCause (methode, cause_racine, id_nc)
+                VALUES (?, ?, ?)
+            """, (methode, cause_racine, id_nc))
+            
+            self.conn.commit()
+            window.destroy()
+            self.show_success_message("Analyse de cause enregistrée!")
+            self.add_audit_trail("Analyse de cause", f"Analyse enregistrée pour NC {id_nc}")
+            logging.info(f"Analyse de cause enregistrée pour NC {id_nc}")
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors de l'enregistrement de l'analyse: {e}")
+            self.show_error_message(f"Impossible d'enregistrer l'analyse : {e}")
+
+    def add_action(self, id_nc):
+        """Ajoute une action corrective à une NC"""
+        win = tk.Toplevel(self.root)
+        win.title("Action corrective")
+
+        ttk.Label(win, text="Description de l'action").pack(pady=5)
+        desc = ttk.Entry(win)
+        desc.pack(fill=tk.X, padx=20)
+
+        ttk.Label(win, text="Responsable").pack(pady=5)
+        resp = ttk.Entry(win)
+        resp.pack(fill=tk.X, padx=20)
+
+        ttk.Label(win, text="Délai (jours)").pack(pady=5)
+        delai = ttk.Entry(win)
+        delai.pack(fill=tk.X, padx=20)
+
+        ttk.Button(
+            win,
+            text="Valider",
+            command=lambda: self.save_action(id_nc, desc.get(), resp.get(), delai.get(), win)
+        ).pack(pady=10)
+
+    def save_action(self, id_nc, description, responsable, delai, window):
+        """Enregistre l'action corrective"""
+        if not description or not responsable or not delai:
+            self.show_warning_message("Champs obligatoires", "Veuillez compléter tous les champs.")
+            return
+
+        try:
+            self.cursor.execute("""
+                INSERT INTO ActionCorrective (description, responsable, delai, id_nc)
+                VALUES (?, ?, ?, ?)
+            """, (description, responsable, int(delai), id_nc))
+            
+            self.conn.commit()
+            window.destroy()
+            self.show_success_message("Action corrective enregistrée!")
+            self.add_audit_trail("Action corrective", f"Action enregistrée pour NC {id_nc}")
+            logging.info(f"Action corrective enregistrée pour NC {id_nc}")
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors de l'enregistrement de l'action: {e}")
+            self.show_error_message(f"Impossible d'enregistrer l'action : {e}")
+
+    # --- VUES DES MODULES SPÉCIFIQUES ---
+
+    def create_nc_table(self):
+        # Créer un Treeview pour afficher les NC
+        columns = ('ID', 'Date', 'Type', 'Poste', 'Gravité', 'Statut', 'Déclarant')
+        self.nc_tree = ttk.Treeview(self.workspace, columns=columns, show='headings')
+        
+        # Définir les en-têtes
+        for col in columns:
+            self.nc_tree.heading(col, text=col)
+            self.nc_tree.column(col, width=150, anchor='center')
+        
+        # Ajouter le treeview
+        self.nc_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Charger les données
+        self.load_nc_list()
+        
+        # Ajouter un menu contextuel pour les actions
+        self.nc_tree.bind("<Button-3>", self.show_nc_context_menu)
+
+    def show_nc_context_menu(self, event):
+        """Menu contextuel pour les NC"""
+        item = self.nc_tree.identify_row(event.y)
+        if item:
+            menu = tk.Menu(self.root, tearoff=0)
+            menu.add_command(label="Analyser la cause", command=lambda: self.add_cause_analysis(self.nc_tree.item(item)['values'][0]))
+            menu.add_command(label="Ajouter action", command=lambda: self.add_action(self.nc_tree.item(item)['values'][0]))
+            menu.add_command(label="Changer statut", command=lambda: self.change_nc_status(self.nc_tree.item(item)['values'][0]))
+            menu.add_command(label="Générer rapport NC", command=lambda: self.generate_nc_report(self.nc_tree.item(item)['values'][0]))
+            menu.post(event.x_root, event.y_root)
+
+    def generate_nc_report(self, id_nc):
+        """Génère un rapport détaillé pour une NC spécifique"""
+        try:
+            # Récupérer les données de la NC
+            self.cursor.execute("""
+                SELECT n.id_nc, n.date_nc, n.type_defaut, n.poste, n.gravite, n.statut, n.description, u.nom as declarant
+                FROM NonConformite n
+                JOIN Utilisateur u ON n.id_user_declarant = u.id_user
+                WHERE n.id_nc = ?
+            """, (id_nc,))
+            nc_data = self.cursor.fetchone()
+            
+            if not nc_data:
+                self.show_error_message("NC non trouvée")
+                return
+            
+            # Récupérer l'analyse de cause
+            self.cursor.execute("""
+                SELECT methode, cause_racine
+                FROM AnalyseCause
+                WHERE id_nc = ?
+            """, (id_nc,))
+            cause_data = self.cursor.fetchone()
+            
+            # Récupérer les actions correctives
+            self.cursor.execute("""
+                SELECT description, responsable, delai, statut, efficacite
+                FROM ActionCorrective
+                WHERE id_nc = ?
+            """, (id_nc,))
+            actions_data = self.cursor.fetchall()
+            
+            # Créer le rapport
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("Fichier PDF", "*.pdf"), ("Tous les fichiers", "*.*")],
+                title=f"Rapport NC {id_nc}"
+            )
+            
+            if file_path:
+                self.create_pdf_report(file_path, nc_data, cause_data, actions_data, id_nc)
+                self.show_success_message(f"Rapport NC #{id_nc} généré avec succès")
+                self.add_audit_trail("Génération rapport NC", f"Rapport NC {id_nc} généré par {self.current_user}")
+                logging.info(f"Rapport NC {id_nc} généré par {self.current_user}")
+        except Exception as e:
+            logging.error(f"Erreur lors de la génération du rapport NC: {e}")
+            self.show_error_message(f"Impossible de générer le rapport: {e}")
+
+    def create_analysis_table(self):
+        # Créer un Treeview pour afficher les analyses
+        columns = ('ID', 'Méthode', 'Cause Racine', 'NC', 'Date')
+        self.analysis_tree = ttk.Treeview(self.workspace, columns=columns, show='headings')
+        
+        # Définir les en-têtes
+        for col in columns:
+            self.analysis_tree.heading(col, text=col)
+            self.analysis_tree.column(col, width=150, anchor='center')
+        
+        # Ajouter le treeview
+        self.analysis_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Charger les données
+        self.load_analysis_list()
+
+    def create_audit_table(self):
+        # Créer un Treeview pour afficher les audits
+        columns = ('ID', 'Process', 'Date', 'Statut')
+        self.audit_tree = ttk.Treeview(self.workspace, columns=columns, show='headings')
+        
+        # Définir les en-têtes
+        for col in columns:
+            self.audit_tree.heading(col, text=col)
+            self.audit_tree.column(col, width=150, anchor='center')
+        
+        # Ajouter le treeview
+        self.audit_tree.pack(fill=tk.BOTH, expand=True)
+        
+        # Charger les données
+        self.load_audit_list()
+
+    def load_nc_list(self):
+        # Effacer les données existantes
+        for item in self.nc_tree.get_children():
+            self.nc_tree.delete(item)
+        
+        # Charger les nouvelles données
+        try:
+            self.cursor.execute("""
+                SELECT n.id_nc, n.date_nc, n.type_defaut, n.poste, n.gravite, n.statut, u.nom as declarant
+                FROM NonConformite n
+                JOIN Utilisateur u ON n.id_user_declarant = u.id_user
+                ORDER BY n.date_nc DESC
+            """)
+            for row in self.cursor.fetchall():
+                self.nc_tree.insert('', 'end', values=row)
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors du chargement des NC: {e}")
+            self.show_error_message(f"Impossible de charger les NC : {e}")
+
+    def load_analysis_list(self):
+        # Effacer les données existantes
+        for item in self.analysis_tree.get_children():
+            self.analysis_tree.delete(item)
+        
+        # Charger les nouvelles données
+        try:
+            self.cursor.execute("""
+                SELECT ac.id_analyse, ac.methode, ac.cause_racine, n.id_nc, ac.date
+                FROM AnalyseCause ac
+                JOIN NonConformite n ON ac.id_nc = n.id_nc
+                ORDER BY ac.id_analyse DESC
+            """)
+            for row in self.cursor.fetchall():
+                self.analysis_tree.insert('', 'end', values=row)
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors du chargement des analyses: {e}")
+            self.show_error_message(f"Impossible de charger les analyses : {e}")
+
+    def load_audit_list(self):
+        # Effacer les données existantes
+        for item in self.audit_tree.get_children():
+            self.audit_tree.delete(item)
+        
+        # Charger les nouvelles données
+        try:
+            self.cursor.execute("""
+                SELECT id, process, date, status
+                FROM audits 
+                ORDER BY date DESC
+            """)
+            for row in self.cursor.fetchall():
+                self.audit_tree.insert('', 'end', values=row)
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors du chargement des audits: {e}")
+            self.show_error_message(f"Impossible de charger les audits : {e}")
+
+    def save_user_session(self):
+        """Sauvegarde la session utilisateur"""
+        try:
+            self.cursor.execute("""
+                INSERT INTO sessions (user_id, login_time, last_activity)
+                VALUES (?, ?, ?)
+            """, (self.user_id, datetime.now(), datetime.now()))
+            self.conn.commit()
+        except sqlite3.Error as e:
+            logging.error(f"Erreur lors de la sauvegarde de la session: {e}")
+
+    def logout(self):
+        """Déconnecte l'utilisateur"""
+        self.add_audit_trail("Déconnexion", f"Utilisateur {self.current_user} déconnecté")
+        self.current_user = None
+        self.user_role = None
+        self.user_id = None
+        self.safe_load_users()  # Recharger les utilisateurs
+        self.show_login()
+        # Arrêter les services en arrière-plan
+        self.notification_system.stop()
+
+    def export_nc_to_excel(self):
+        """Exporte les NC vers un fichier Excel"""
+        try:
+            # Récupérer les données
+            self.cursor.execute("""
+                SELECT n.id_nc, n.date_nc, n.type_defaut, n.poste, n.gravite, n.statut, n.description, u.nom as declarant
+                FROM NonConformite n
+                JOIN Utilisateur u ON n.id_user_declarant = u.id_user
+                ORDER BY n.date_nc DESC
+            """)
+            nc_data = self.cursor.fetchall()
+            
+            if not nc_data:
+                self.show_warning_message("Aucune NC à exporter")
+                return
+                
+            # Demander le fichier d'export
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx",
+                filetypes=[("Fichier Excel", "*.xlsx"), ("Tous les fichiers", "*.*")],
+                title="Exporter les NC"
+            )
+            
+            if not file_path:
+                return
+                
+            # Créer un DataFrame pandas
+            df = pd.DataFrame(nc_data, columns=['ID', 'Date', 'Type', 'Poste', 'Gravité', 'Statut', 'Description', 'Déclarant'])
+            
+            # Exporter vers Excel
+            df.to_excel(file_path, index=False)
+            
+            self.show_success_message(f"{len(nc_data)} NC exportées avec succès")
+            logging.info(f"Export des NC vers {file_path}")
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de l'export des NC: {e}")
+            self.show_error_message(f"Impossible d'exporter les NC: {e}")
+
+    def export_database(self):
+        """Exporte la base de données"""
+        try:
+            # Demander le fichier d'export
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".db",
+                filetypes=[("Fichier SQLite", "*.db"), ("Tous les fichiers", "*.*")],
+                title="Exporter la base de données"
+            )
+            
+            if not file_path:
+                return
+                
+            # Copier la base de données
+            import shutil
+            shutil.copy2(self.db_path, file_path)
+            
+            self.show_success_message("Base de données exportée avec succès")
+            logging.info(f"Export de la base de données vers {file_path}")
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de l'export de la base de données: {e}")
+            self.show_error_message(f"Impossible d'exporter la base de données: {e}")
+
+    def backup_database(self):
+        """Sauvegarde la base de données"""
+        try:
+            # Créer un nom de fichier avec timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_path = f"qtrack_backup_{timestamp}.db"
+            
+            # Copier la base de données
+            import shutil
+            shutil.copy2(self.db_path, backup_path)
+            
+            self.show_success_message(f"Base de données sauvegardée sous {backup_path}")
+            logging.info(f"Sauvegarde de la base de données vers {backup_path}")
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la sauvegarde de la base de données: {e}")
+            self.show_error_message(f"Impossible de sauvegarder la base de données: {e}")
+
+    def clear_database(self):
+        """Vide la base de données"""
+        if messagebox.askyesno("Confirmation", "Voulez-vous vraiment vider la base de données? Toutes les données seront perdues!"):
+            try:
+                # Fermer la connexion
+                self.conn.close()
+                
+                # Supprimer le fichier de base de données
+                import os
+                if os.path.exists(self.db_path):
+                    os.remove(self.db_path)
+                
+                # Recréer la base de données
+                self.conn = sqlite3.connect(self.db_path)
+                self.cursor = self.conn.cursor()
+                self.initialize_database()
+                
+                self.show_success_message("Base de données vidée et réinitialisée")
+                logging.info("Base de données vidée et réinitialisée")
+                
+            except Exception as e:
+                logging.error(f"Erreur lors du vidage de la base de données: {e}")
+                self.show_error_message(f"Impossible de vider la base de données: {e}")
+
+    def create_pdf_report(self, file_path, nc_data, cause_data, actions_data, id_nc):
+        """Crée un rapport PDF pour une NC spécifique"""
+        try:
+            # Créer le document PDF
+            doc = SimpleDocTemplate(file_path, pagesize=letter)
+            elements = []
+            
+            # Styles
+            styles = getSampleStyleSheet()
+            title_style = styles['Heading1']
+            section_style = styles['Heading2']
+            normal_style = styles['BodyText']
+            
+            # Titre
+            title = Paragraph(f"Rapport Non-Conformité #{id_nc}", title_style)
+            elements.append(title)
+            elements.append(Spacer(1, 20))
+            
+            # Section 1: Informations de base
+            info_title = Paragraph("1. Informations de base", section_style)
+            elements.append(info_title)
+            elements.append(Spacer(1, 10))
+            
+            # Tableau des informations
+            info_data = [
+                ['ID NC', str(nc_data[0])],
+                ['Date', nc_data[1]],
+                ['Type de défaut', nc_data[2]],
+                ['Poste', nc_data[3]],
+                ['Gravité', nc_data[4]],
+                ['Statut', nc_data[5]],
+                ['Déclarant', nc_data[7]]
+            ]
+            
+            info_table = Table(info_data)
+            info_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(info_table)
+            elements.append(Spacer(1, 20))
+            
+            # Section 2: Description
+            desc_title = Paragraph("2. Description", section_style)
+            elements.append(desc_title)
+            elements.append(Spacer(1, 10))
+            
+            desc_text = Paragraph(nc_data[6], normal_style)
+            elements.append(desc_text)
+            elements.append(Spacer(1, 20))
+            
+            # Section 3: Analyse de cause
+            if cause_data:
+                cause_title = Paragraph("3. Analyse de cause", section_style)
+                elements.append(cause_title)
+                elements.append(Spacer(1, 10))
+                
+                cause_data_table = [
+                    ['Méthode', cause_data[0]],
+                    ['Cause racine', cause_data[1]]
+                ]
+                
+                cause_table = Table(cause_data_table)
+                cause_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                elements.append(cause_table)
+                elements.append(Spacer(1, 20))
+            
+            # Section 4: Actions correctives
+            if actions_data:
+                action_title = Paragraph("4. Actions correctives", section_style)
+                elements.append(action_title)
+                elements.append(Spacer(1, 10))
+                
+                action_data = [['Description', 'Responsable', 'Délai', 'Statut', 'Efficacité']]
+                for action in actions_data:
+                    action_data.append([
+                        action[0], action[1], str(action[2]), action[3], action[4]
+                    ])
+                
+                action_table = Table(action_data)
+                action_table.setStyle(TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesoke),
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                    ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black)
+                ]))
+                elements.append(action_table)
+            
+            # Générer le PDF
+            doc.build(elements)
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la création du rapport PDF: {e}")
+            raise
+
+    def generate_monthly_nc_report(self):
+        """Génère un rapport mensuel des NC"""
+        self.report_generator.generate_comprehensive_report("monthly")
+
+    def generate_action_report(self):
+        """Génère un rapport des actions correctives"""
+        try:
+            # Récupérer les données
+            self.cursor.execute("""
+                SELECT a.id_action, a.description, a.responsable, a.delai, a.statut, a.efficacite, n.id_nc, n.type_defaut
+                FROM ActionCorrective a
+                JOIN NonConformite n ON a.id_nc = n.id_nc
+                WHERE a.statut != 'Clos'
+                ORDER BY a.delai ASC
+            """)
+            actions_data = self.cursor.fetchall()
+            
+            if not actions_data:
+                self.show_warning_message("Aucune action corrective en cours")
+                return
+                
+            # Créer le rapport PDF
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".pdf",
+                filetypes=[("Fichier PDF", "*.pdf"), ("Tous les fichiers", "*.*")],
+                title="Rapport Actions Correctives"
+            )
+            
+            if not file_path:
+                return
+                
+            # Créer le document PDF
+            doc = SimpleDocTemplate(file_path, pagesize=letter)
+            elements = []
+            
+            # Styles
+            styles = getSampleStyleSheet()
+            title_style = styles['Heading1']
+            section_style = styles['Heading2']
+            normal_style = styles['BodyText']
+            
+            # Titre
+            title = Paragraph("Rapport Actions Correctives", title_style)
+            elements.append(title)
+            elements.append(Spacer(1, 20))
+            
+            # Section 1: Résumé
+            summary_title = Paragraph("1. Résumé", section_style)
+            elements.append(summary_title)
+            elements.append(Spacer(1, 10))
+            
+            total_actions = len(actions_data)
+            ouvertes = sum(1 for a in actions_data if a[3] < 0)  # Délai négatif = en retard
+            en_cours = sum(1 for a in actions_data if a[3] >= 0 and a[4] != 'Clos')
+            
+            summary_data = [
+                ['Métrique', 'Valeur'],
+                ['Total actions', str(total_actions)],
+                ['Actions en retard', str(ouvertes)],
+                ['Actions en cours', str(en_cours)]
+            ]
+            
+            summary_table = Table(summary_data)
+            summary_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(summary_table)
+            elements.append(Spacer(1, 20))
+            
+            # Section 2: Détails des actions
+            details_title = Paragraph("2. Détails des actions", section_style)
+            elements.append(details_title)
+            elements.append(Spacer(1, 10))
+            
+            action_data = [['ID', 'Description', 'Responsable', 'Délai', 'Statut', 'Efficacité', 'NC']]
+            for action in actions_data:
+                action_data.append([
+                    str(action[0]), action[1], action[2], str(action[3]), action[4], action[5], str(action[6])
+                ])
+            
+            action_table = Table(action_data)
+            action_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, 0), colors.grey),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesoke),
+                ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+                ('GRID', (0, 0), (-1, -1), 1, colors.black)
+            ]))
+            elements.append(action_table)
+            
+            # Générer le PDF
+            doc.build(elements)
+            self.show_success_message("Rapport actions correctives généré avec succès")
+            logging.info("Rapport actions correctives généré")
+            
+        except Exception as e:
+            logging.error(f"Erreur lors de la génération du rapport actions: {e}")
+            self.show_error_message(f"Impossible de générer le rapport: {e}")
+
+    def generate_quality_summary(self):
+        """Génère un rapport synthèse qualité"""
+        self.report_generator.generate_comprehensive_report("quarterly")
+
+    def change_nc_status(self, id_nc):
+        """Change le statut d'une NC"""
+        # Implémenter la logique de changement de statut
+        pass
+
+    def __del__(self):
+        if hasattr(self, 'conn'):
+            self.conn.close()
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = QTrackRiahiApp(root)
+    root.mainloop()
